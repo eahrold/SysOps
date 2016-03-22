@@ -66,9 +66,13 @@ class NotificationManager(object):
     @staticmethod
     def modify_webhooks(name, webhook, add):
         webhook_file = NotificationManager.webhooks_file()
-        data = open(webhook_file, 'r').read()
         
-        all_webhooks = json.loads(data)
+        if os.path.isfile(webhook_file):
+            data = open(webhook_file, 'r').read()
+            all_webhooks = json.loads(data)
+        else:
+            all_webhooks = {}
+
         registered_webhooks = set(all_webhooks.get(name, []))
         
         if add:
@@ -78,7 +82,7 @@ class NotificationManager(object):
 
         all_webhooks[name] = list(registered_webhooks)
 
-        file = open(webhook_file, 'w')
+        file = open(webhook_file, 'w+')
         data = json.dumps(all_webhooks)
         file.write(data)
         file.close()
