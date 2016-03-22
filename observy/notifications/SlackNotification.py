@@ -26,7 +26,6 @@ class SlackNotification(HookableNotifications):
 
             host_info = self.host_info()
             full_message = "Alert from %s: %s at %s" % (host_info['host'], 
-                                                        host_info['ip'],
                                                         message,
                                                         self.timestamp()
                                                         )
