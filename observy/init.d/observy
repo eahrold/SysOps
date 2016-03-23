@@ -18,8 +18,11 @@ DESC="Observe and manage service status"
 NAME='observy'
 
 # change {{ cur_dir_path }} below to the install directory of Observy
-DIR='{{ cur_dir_path }}'
-DAEMON_ARGS="--schedule={{ schedule_int }}"
+DIR='{{ exec_dir_path }}'
+SERVICE_DATA_DIR='{{ service_data_dir }}'
+
+DAEMON_ARGS="--daemon --directory=${SERVICE_DATA_DIR}"
+
 
 DAEMON="${DIR}/${NAME}.py"
 PIDFILE=/var/run/$NAME.pid

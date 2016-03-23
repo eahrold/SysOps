@@ -35,13 +35,12 @@ class NotificationManager(object):
     
     def send(self):
         for c in self.notificationClasses():
-            print "sending to %s" % c
-
             notifier = c(self.errors)
             notifier.send()
 
     def notificationClasses(self):
-        paths = glob.glob('./notifications/*Notification.py')
+        path = os.path.join(os.path.dirname(os.path.realpath(__file__)), '*Notification.py')
+        paths = glob.glob(path)
         classes =[]
         for p in paths:
             class_name =  os.path.splitext(os.path.basename(p))[0]
@@ -83,7 +82,7 @@ class NotificationManager(object):
         all_webhooks[name] = list(registered_webhooks)
 
         file = open(webhook_file, 'w+')
-        data = json.dumps(all_webhooks)
+        data = json.dumps(all_webhooks, indent=2)
         file.write(data)
         file.close()
 
@@ -94,12 +93,6 @@ class Notifications(object):
     def __init__(self, errors):
         super(Notifications, self).__init__()
         self.errors = errors
-    
-    def webhooks(self, name):
-        #url webhooks
-        path = os.path.join()
-        data = open('webhooks.conf.json', 'r').read()
-        return json.dumps().get(name,[]);
 
     def send(self):
         """Send Notification"""
@@ -113,7 +106,7 @@ class Notifications(object):
         }
 
     def timestamp(self):
-        return date.now()
+        return str(date.now())
 
 class HookableNotifications(Notifications):
     """Notification class that uses webhooks"""

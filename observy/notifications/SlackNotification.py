@@ -16,15 +16,15 @@ class SlackNotification(HookableNotifications):
         super(SlackNotification, self).__init__(errors)
 
     def send(self):
-        print "Sening notifications"
+        print "Sening slack notifications"
 
         for error in self.errors: 
             message = error['message']
             status_code = error['status_code']
             icon_emoji = ":fire_engine:" if status_code is 3 else ":fire:"
             username = "server-notice" if status_code is 3 else "server-alert"
-
             host_info = self.host_info()
+            
             full_message = "Alert from %s: %s at %s" % (host_info['host'], 
                                                         message,
                                                         self.timestamp()
@@ -42,7 +42,6 @@ class SlackNotification(HookableNotifications):
                     req = urllib2.Request(webhook)
                     req.add_header('Content-Type', 'application/json')
                     response = urllib2.urlopen(req, json.dumps(payload))
-                except Exception as error:
-                    print error
-
+                except Exception as e:
+                    pass
 

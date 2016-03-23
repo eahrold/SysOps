@@ -24,8 +24,9 @@
 
 import os, sys, getopt, subprocess
 import json
+import syslog
 
-from datetime import datetime as date
+from datetime import datetime, timedelta
 from time import sleep
 
 from notifications import NotificationManager
@@ -40,96 +41,137 @@ class ServiceMonitor(object):
     '''Base class for service monitor'''
 
     error_bag = None
+    _last_checks = None
 
+    _localizables = {
+        'err.reg': "There was a problem registering the service (%s)",
+        'not.running': "%s is either not currently running, or not a managed service",
+        'new.serv': "Created service file: %s:\n%s",
+
+        'rem.serv': "Removing %s service file",
+        'err.rem.serv': "Error Removing the service file",
+        'not.reg': "%s service isn't registered",
+    }
+    
     def __init__(self, service_dir=None):
         super(ServiceMonitor, self).__init__()
         self.error_bag = []
         self._service_dir = service_dir if service_dir \
                                         else self.service_dir()
+        self._last_checks = {}
 
     #----------------------------------------------------------
     # Check The services
     #-------------------------------------------------------
     def check(self):
         '''Check services'''
+        self.error_bag = []
         services = self.get_registered_services()
         success = True
 
         for service_dict in services:
             service = service_dict['service']
             success_string = service_dict['success_string']
-            attempt_restart = service_dict['attempt_restart']
+            attempt_restart = service_dict.get('attempt_restart', True)
+            check_interval = service_dict.get('check_interval', 60)
 
-            out, err, rc = self._status(service);
-            
-            internal_rc = 0 if out == success_string else 1
-            if internal_rc is not 0:
-                success = False
-                if attempt_restart:
+            if self._should_check(service, check_interval):
+                print "Checking %s" % service
+                out, err, rc = self._status(service);
 
-                    if self._start(service) != 0:
-                        rc = 2        
-                    else:
-                        internal_rc = 3
-                
-                error = { 'status_code': internal_rc,
-                          'message': self._status_message(service, internal_rc),
-                          'date': date.now(),
-                        }
-                self.error_bag.append(error)
-
+                internal_rc = 0 if out == success_string else 1
+                if internal_rc is not 0:
+                    success = False
+                    if attempt_restart:
+                        if self._start(service) != 0:
+                            rc = 2        
+                        else:
+                            internal_rc = 3
+                    
+                    error = { 'status_code': internal_rc,
+                              'message': self._status_message(service, internal_rc),
+                              'date': str(datetime.now()),
+                            }
+                    self.error_bag.append(error)
         return success
 
     #----------------------------------------------------------
     # Get/Set registered services
     #-------------------------------------------------------
-    def register_service(self, service, attempt_restart):
-        proc = subprocess.Popen(["/usr/sbin/service", '--status-all'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        
-        for line in iter(proc.stdout.readline,''):
-            s = line.split(']')[1].strip()
-            if service == s:
-                global __version__
-                success_string, error, rc = self._exec_service(service, 'status')
-                if rc != 0:
-                    print "There was a problem registering the service (%s)" % success_string
-                    return rc
+    def register_service(self, service, interval=60, attempt_restart=True):
+        global __version__
 
-                service_file = service + '.service'
-                service_dict = { 'service': service,
-                                 'success_string': success_string,
-                                 'attempt_restart': attempt_restart,
-                                 'version': __version__,
-                }
-                
-                if not os.path.exists(self._service_dir):
-                    os.makedirs(self._service_dir)
+        for s in self._service_list()[0]:
+            if service != s:
+                continue
 
-                path = os.path.join(self._service_dir, service_file)
-                with open(path, 'wb') as f:
-                    data = json.dumps(service_dict)
-                    f.write(data)
-                    f.close()
-                    print "created service file: %s: %s" % (path, data)
-                    return 0
+            success_string, error, rc = self._exec_service(service, 'status')
+            if rc != 0:
+                print self._localizables['err.reg'] % success_string
+                return rc
 
-        print "%s is either not currently running, or not a managed service" % service 
+            service_file = service + '.service'
+            service_dict = { 
+                'service': service,
+                'success_string': success_string,
+                'attempt_restart': attempt_restart,
+                'check_interval': interval or 60,
+                'version': __version__,
+            }
+            
+            if not os.path.exists(self._service_dir):
+                os.makedirs(self._service_dir)
+
+            path = os.path.join(self._service_dir, service_file)
+            with open(path, 'wb') as file:
+                data = json.dumps(service_dict, indent=2)
+                file.write(data)
+                file.close()
+                print self._localizables['new.serv'] % (path, data) 
+                return 0
+
+        print self._localizables['not.running'] % service 
     
+    def remove_service(self, service):
+        service_file = service + '.service'
+        path = os.path.join(self._service_dir, service_file)
+        if os.path.isfile(path):
+            try: 
+                print self._localizables['rem.serv'] % service 
+                os.remove(path)
+            except Exception as e:
+                print self._localizables['err.rem.serv'] 
+                return 1
+        else:
+            print self._localizables['not.reg'] % service 
+        return 0
+
+
     def get_registered_services(self):
         import glob
         services = []
-
         service_files = glob.glob(self._service_dir+'/*.service')
         for item in service_files:
-            head, file_name = os.path.split(item)
-            file = open(item, 'r')
-            
-            json_data = json.loads(file.read())
-            file.close()
-        
-            services.append(json_data)
-
+            data = open(item, 'r').read()
+            services.append(json.loads(data))
         return services
+
+    #----------------------------------------------------------
+    # Util
+    #-------------------------------------------------------
+    def _should_check(self, service, interval):
+        # Do the date compare routine 
+        now = datetime.now()
+        last_check = self._last_checks.get(service);
+        
+        should =  not last_check or \
+            ((now - last_check) > timedelta(minutes=interval))
+
+        if should:
+            # if we should check update the timestamp to now
+            self._last_checks[service] = now;
+        return should
+
 
     #----------------------------------------------------------
     # Message
@@ -151,25 +193,55 @@ class ServiceMonitor(object):
     #------------------------------------------------------
     def _start(self, service):
         return self._exec_service(service, 'start')[2]
-        
+
+    def _stop(self, service):
+        return self._exec_service(service, 'stop')[2]
+
     def _status(self, service):
         return self._exec_service(service, 'status')
-         
+
+    def _service_list(self):
+        running = []
+        stopped = []
+        procs = self._status_all()
+        for r in procs[0]:
+            running.append(r.split(']')[1].strip())
+        for e in procs[1]:
+            stopped.append(r.split(']')[1].strip())
+
+        return (running, stopped)
+
+    def _status_all(self):
+        proc = subprocess.Popen(
+            ["/usr/sbin/service", '--status-all'],
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.PIPE
+        )
+        (data, error) = proc.communicate()
+        return (data.splitlines(), error.splitlines())
+
     def _exec_service(self, service, cmd):
-        #prints results and merges stdout and std
-        p = subprocess.Popen(["/usr/sbin/service", service, cmd], stdout=subprocess.PIPE)
-        (data, error) = p.communicate()
-        return (data, error, p.returncode)
+        proc = subprocess.Popen(
+            ["/usr/sbin/service", service, cmd], 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.PIPE
+        )
+        (data, error) = proc.communicate()
+        return (data, error, proc.returncode)
 
     @staticmethod
     def service_dir():
         return os.path.join(os.path.dirname(os.path.realpath(__file__)), 'services')
 
-def run(service_checker):
+def run(service_checker, keep_alive=False):
     ''' Execute the service checker process '''
-    if not service_checker.check():
-        notifier = NotificationManager(service_checker.error_bag);
-        notifier.send()
+    i = 0
+    while True:
+        if not service_checker.check():
+            notifier = NotificationManager(service_checker.error_bag);
+            notifier.send()
+        if not keep_alive: break
+        sleep(1)
 
 #----------------------------------------------------------
 # Install / Uninstall
@@ -177,7 +249,7 @@ def run(service_checker):
 def initd_script_name():
     return 'observy'
 
-def install(schedule=60):
+def install(service_data_dir):
     ''' Install the rc.d script, register with update-rc.d
     '''
     from shutil import copyfile
@@ -187,8 +259,10 @@ def install(schedule=60):
     dst = os.path.join('/etc/init.d', initd_script_name())
     
     data=open(src,'r').read()
-    data=data.replace('{{ cur_dir_path }}', base_path)
-    data=data.replace('{{ schedule_int }}', str(schedule))
+    
+    data=data.replace('{{ exec_dir_path }}', base_path)
+    data=data.replace('{{ service_data_dir }}', 
+        service_data_dir or ServiceMonitor.service_dir())
 
     outfile=open(dst,'w')
     outfile.write(data)
@@ -196,7 +270,8 @@ def install(schedule=60):
 
     # Set the executable bit 
     os.chmod(dst, 0700);
-    pipe = subprocess.PIPE
+    stdout = subprocess.PIPE
+    stderr = subprocess.PIPE
 
     if not os.path.isfile(dst):
         print "There was a problem copying the init.d script"
@@ -204,12 +279,19 @@ def install(schedule=60):
     else:
         print "Starting observy system"
         try:
-            rc = subprocess.check_call(['update-rc.d', '-f', initd_script_name(), 'remove'], stdout=pipe)
+            rc = subprocess.check_call(
+                ['update-rc.d', '-f', initd_script_name(), 'remove'], 
+                stdout=stdout
+            )
         except Exception as e:
             pass
 
-        if subprocess.check_call(['update-rc.d', initd_script_name(), 'defaults'], stdout=pipe) == 0:
-            rc = subprocess.check_call(["/usr/sbin/service", initd_script_name(), 'start'], stdout=pipe)
+        # register the service
+        update_cmd = ['update-rc.d', initd_script_name(), 'defaults'] 
+        if subprocess.check_call(update_cmd, stdout=stdout) == 0:
+            # fire up the service
+            service_start_cmd = ["/usr/sbin/service", initd_script_name(), 'start']
+            rc = subprocess.check_call(service_start_cmd, stdout=stdout)
         else:
             print "There was a problem setting update-rc.d"
     return rc
@@ -217,15 +299,22 @@ def install(schedule=60):
 def remove():
     ''' Remove from update-rc.d'''
     print "Removing the init.d script and stopping service"
-    pipe = subprocess.PIPE
+    stdout = subprocess.PIPE
 
     try:
-        subprocess.check_call(["/usr/sbin/service", initd_script_name(), 'stop'], stdout=pipe) == 0
-        rc = subprocess.check_call(['update-rc.d', '-f', initd_script_name(), 'remove'], stdout=subprocess.PIPE)
+        # Stop the service
+        service_stop_command = ["/usr/sbin/service", initd_script_name(), 'stop']
+        subprocess.check_call(service_stop_command, stdout=stdout) == 0
+
+        # Remove from registry
+        remove_cmd = ['update-rc.d', '-f', initd_script_name(), 'remove']
+        rc = subprocess.check_call(remove_cmd, stdout=stdout)
         if rc == 0:
+            # Finally delete the init.d file
             os.remove(os.path.join('/etc/init.d/', initd_script_name()))
     except Exception as e:
-        pass
+        print "There was a problem removing the init.d script"
+        raise e
         
 
 #----------------------------------------------------------
@@ -251,13 +340,15 @@ Service Registration
                                running `/usr/sbin/service xyz status`
    -n, --no-restart            By default an attempt is made to restart a stopped service, 
                                use this flag to bypass a restart attempt.
+   -s, --schedule=INT          How often to check in minuets defaults to 60.
+   -X, --unregister=NAME       Stop watching the service file
+
 Notification Configuration
    -w, --webhook=KIND:URL      Register a webhook url for a notification service. use like this...
                                "--webhook=slack:"https://hooks.slack.com/services/ASD...VSTH"
    --remove-webhook=KIND:URL   Remove a previouslty registered webhook (same format as above)              
 Installation
    -i, --install               Install init.d script into /etc/init.d/observy
-   -s, --schedule=INT          How often to check in minuets defaults to 60.
    -d, --directory=DIR         Full file path to the location where the %s service data is stored
                                defaults to %s
    -x, --remove                Remove init.d script
@@ -274,7 +365,7 @@ def main(argv):
     '''Main method'''
     # getopts   
     try:
-        opts, args = getopt.getopt(sys.argv[1:], "s:d:r:w:nixh", \
+        opts, args = getopt.getopt(sys.argv[1:], "s:d:r:w:K:X:niDxh", \
             [ "schedule=",
               "directory=",
               "register=",
@@ -283,6 +374,7 @@ def main(argv):
               "no-restart",
               "install",
               "remove",
+              "daemon",
               "help" ]
         )
 
@@ -290,6 +382,8 @@ def main(argv):
            usage(err, 2)
 
     service = None
+    remove_service = False
+
     webhook = None
     remove_webhook = False
 
@@ -297,27 +391,37 @@ def main(argv):
     schedule = None
 
     attempt_restart = True
-    do_install = False
-    do_remove = False
+    install_initd = False
+    remove_initd = False
+
+    daemonize = False
 
     for opt, arg in opts:
         if opt in ("-r", "--register"):
             service = arg
-        if opt in ("-w", "--webhook"):
-            webhook = arg
-        if opt in ("--remove-webhook"):
-            webhook = arg
-            remove_webhook = True
-        if opt in ("-d", "--directory"):
-            directory = arg
-        if opt in ("-n", "--no-restart"):
-            attempt_restart = False
-        if opt in ("-i", "--install"):
-            do_install = True
         if opt in ("-s", "--schedule"):
             schedule = float(arg)
+        if opt in ("-n", "--no-restart"):
+            attempt_restart = False
+        if opt in ("-X", "--unregister"):
+            service = arg
+            remove_service = True
+
+        if opt in ("-w", "--webhook"):
+            webhook = arg
+        if opt in ("-K", "--remove-webhook"):
+            webhook = arg
+            remove_webhook = True
+
+        if opt in ("-i", "--install"):
+            install_initd = True
+        if opt in ("-d", "--directory"):
+            directory = arg
         if opt in ("-x", "--remove"):
-            do_remove = True
+            remove_initd = True
+        if opt in ("-D", "--daemon"):
+            daemonize = True
+        
         if opt in ("-h", "--help"):
             usage()
             sys.exit()
@@ -327,11 +431,11 @@ def main(argv):
         exit("You need to have root privileges to run this script. Exiting.")
         sys.exit(1)
     
-    if do_remove:
+    if remove_initd:
         rc = remove()
         sys.exit(rc)
-    elif do_install:
-        rc = install(schedule)
+    elif install_initd:
+        rc = install(directory)
         sys.exit(rc)
 
     # Register Webhooks
@@ -343,18 +447,24 @@ def main(argv):
             NotificationManager.remove_webhook(hook[0], hook[1])
         sys.exit(0)
    
+    # Add Remove servcies
     service_checker = ServiceMonitor(directory)
     if service:
-        rc = service_checker.register_service(service, attempt_restart)
+        if remove_service:
+            rc = service_checker.remove_service(service)
+        else:
+            rc = service_checker.register_service(service, schedule, attempt_restart)
         sys.exit(rc)
     
-    if(schedule):
-        while True:
-            run(service_checker)
-            sleep(schedule)
-    else:
-        run(service_checker)
+    # Run
+    sys.exit(run(service_checker, keep_alive=daemonize))
 
-    
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    try:
+        sys.exit(main(sys.argv))
+    except KeyboardInterrupt as e:
+        print '\nStopping monitor...'
+        sys.exit(0)
+    except Exception as e:
+        syslog.syslog(syslog.LOG_ERR, "Excepton %s" % e)
+
