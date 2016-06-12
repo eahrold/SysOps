@@ -79,7 +79,7 @@ class ServiceMonitor(object):
                 print "Checking %s" % service
                 out, err, rc = self._status(service);
 
-                internal_rc = 0 if out == success_string or out.str.startswith(success_string) else 1
+                internal_rc = 0 if out == success_string or out.startswith(success_string) else 1
                 if internal_rc is not 0:
                     success = False
                     if attempt_restart:
