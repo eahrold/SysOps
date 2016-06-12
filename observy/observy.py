@@ -84,7 +84,7 @@ class ServiceMonitor(object):
                     success = False
                     if attempt_restart:
                         if self._start(service) != 0:
-                            rc = 2        
+                            internal_rc = 2        
                         else:
                             internal_rc = 3
                     
