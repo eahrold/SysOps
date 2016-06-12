@@ -45,7 +45,7 @@ class ServiceMonitor(object):
 
     _localizables = {
         'err.reg': "There was a problem registering the service (%s)",
-        'not.running': "%s is either not currently running, or not a managed service",
+        'not.running': "%s is either not currently running, or not managed by the service executable",
         'new.serv': "Created service file: %s:\n%s",
 
         'rem.serv': "Removing %s service file",
@@ -98,12 +98,13 @@ class ServiceMonitor(object):
     #----------------------------------------------------------
     # Get/Set registered services
     #-------------------------------------------------------
-    def register_service(self, service, interval=60, attempt_restart=True):
+    def register_service(self, service, interval=60, attempt_restart=True, force=False):
         global __version__
 
-        for s in self._service_list()[0]:
+        for s in self._service_list(force)[0]:
             if service != s:
                 continue
+
 
             success_string, error, rc = self._exec_service(service, 'status')
             if rc != 0:
@@ -200,14 +201,17 @@ class ServiceMonitor(object):
     def _status(self, service):
         return self._exec_service(service, 'status')
 
-    def _service_list(self):
+    def _service_list(self, combined=False):
         running = []
         stopped = []
         procs = self._status_all()
         for r in procs[0]:
             running.append(r.split(']')[1].strip())
         for e in procs[1]:
-            stopped.append(r.split(']')[1].strip())
+            if combined:
+                running.append(e.split(']')[1].strip())
+            else:
+                stopped.append(e.split(']')[1].strip())
 
         return (running, stopped)
 
@@ -340,6 +344,9 @@ Service Registration
                                running `/usr/sbin/service xyz status`
    -n, --no-restart            By default an attempt is made to restart a stopped service, 
                                use this flag to bypass a restart attempt.
+   -f, --force                 Certian services don't show as running even when they are.
+                               They may show like [?]. If you know for a fact they're running
+                               use this flag to register the servcie.        
    -s, --schedule=INT          How often to check in minuets defaults to 60.
    -X, --unregister=NAME       Stop watching the service file
 
@@ -347,11 +354,13 @@ Notification Configuration
    -w, --webhook=KIND:URL      Register a webhook url for a notification service. use like this...
                                "--webhook=slack:"https://hooks.slack.com/services/ASD...VSTH"
    --remove-webhook=KIND:URL   Remove a previouslty registered webhook (same format as above)              
+
 Installation
    -i, --install               Install init.d script into /etc/init.d/observy
    -d, --directory=DIR         Full file path to the location where the %s service data is stored
                                defaults to %s
    -x, --remove                Remove init.d script
+
 Help
    -h, --help                  Show this help info
 ''' % (exec_name, ServiceMonitor.service_dir())
@@ -365,13 +374,14 @@ def main(argv):
     '''Main method'''
     # getopts   
     try:
-        opts, args = getopt.getopt(sys.argv[1:], "s:d:r:w:K:X:niDxh", \
+        opts, args = getopt.getopt(sys.argv[1:], "s:d:r:w:K:X:nfiDxh", \
             [ "schedule=",
               "directory=",
               "register=",
               "webhook=",
               "remove-webhook=",
               "no-restart",
+              "force",
               "install",
               "remove",
               "daemon",
@@ -391,6 +401,7 @@ def main(argv):
     schedule = None
 
     attempt_restart = True
+    force = False
     install_initd = False
     remove_initd = False
 
@@ -403,6 +414,8 @@ def main(argv):
             schedule = float(arg)
         if opt in ("-n", "--no-restart"):
             attempt_restart = False
+        if opt in ("-f", "--force"):
+            force = True
         if opt in ("-X", "--unregister"):
             service = arg
             remove_service = True
@@ -453,7 +466,7 @@ def main(argv):
         if remove_service:
             rc = service_checker.remove_service(service)
         else:
-            rc = service_checker.register_service(service, schedule, attempt_restart)
+            rc = service_checker.register_service(service, schedule, attempt_restart, force)
         sys.exit(rc)
     
     # Run
